@@ -1,0 +1,198 @@
+# "org" ensures this Service is used with the correct Serverless Framework Access Key.
+org: kursserverless
+# "app" enables Serverless Framework Dashboard features and sharing them with other Services.
+app: ticket-system
+# "service" is the name of this project. This will also be added to your AWS resource names.
+service: ticket-system
+
+stages:
+  default:
+    params:
+      tableName: "tickets-table-${sls:stage}"
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  stage: ${opt:stage, 'dev'}
+  region: eu-central-1
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+          Resource:
+            - Fn::GetAtt: [TicketsTable, Arn]
+            - Fn::Sub: "${TicketsTable.Arn}/index/*"
+        - Effect: Allow
+          Action: 
+            - cognito-idp:AdminInitiateAuth
+            - cognito-idp:AdminCreateUser
+            - cognito-idp:AdminSetUserPassword
+          Resource: 
+            - Fn::Sub: arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPool}
+        - Effect: Allow
+          Action: 
+            - s3:PutObject
+            - s3:GetObject
+            - s3:PutObjectAcl
+          Resource:
+            - Fn::Sub: arn:aws:s3:::${self:service}-${self:provider.stage}-attachments/*
+        - Effect: Allow
+          Action: 
+            - sqs:SendMessage
+          Resource: 
+            - Fn::Sub: arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${self:service}-${self:provider.stage}-ticket-queue
+        - Effect: Allow
+          Action: 
+            - ses:SendEmail
+            - ses:SendRawEmail
+          Resource: "*"
+  environment:
+    TICKETS_TABLE: ${param:tableName}
+    USER_POOL_ID: { Ref: UserPool }
+    CLIENT_ID: { Ref: UserClient }
+    REGION: ${self:provider.region}
+    BUCKET_NAME: ${self:service}-${self:provider.stage}-attachments
+    SQS_QUEUE: { Ref: TicketQueue }
+    ADMIN_EMAIL: "kursserverless@gmail.com"
+  httpApi:
+    authorizers:
+      ticketSystemAuthorizer:
+        type: jwt
+        identitySource: $request.header.Authorization
+        issuerUrl: 
+          Fn::Sub: https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}
+        audience:
+          - { Ref: UserClient }
+
+functions:
+  auth:
+    handler: auth.handler
+    events:
+      - httpApi:
+          path: /auth/{proxy+}
+          method: POST
+  tickets:
+    handler: tickets.handler
+    events:
+      - httpApi: 
+          path: /ticket/{proxy+}
+          method: ANY
+          authorizer:
+            name: ticketSystemAuthorizer
+  processQueue:
+    handler: tickets.processQueue
+    events:
+      - sqs:
+          arn: 
+            Fn::GetAtt: [TicketQueue, Arn]
+  dailyTicketReminder:
+    handler: tickets.dailyTicketReminder
+    events:
+      - schedule: 
+          rate: cron(* 8 ? * 2-6 *)
+resources:
+  Resources:
+    UserPool:
+      Type: AWS::Cognito::UserPool
+      Properties: 
+        UserPoolName: ${self:service}-${self:provider.stage}-auth-pool
+        Schema:
+          - Name: email
+            Required: true
+            Mutable: true
+        AutoVerifiedAttributes: ["email"]
+    UserClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        ClientName: ${self:service}-${self:provider.stage}-auth-pool-client
+        GenerateSecret: false
+        UserPoolId: { Ref: UserPool }
+        AccessTokenValidity: 5
+        IdTokenValidity: 5
+        ExplicitAuthFlows: 
+          - "ADMIN_NO_SRP_AUTH"
+    TicketsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: ticketId
+            AttributeType: S
+          - AttributeName: userSub
+            AttributeType: S
+          - AttributeName: status
+            AttributeType: S   
+          - AttributeName: createdAt
+            AttributeType: N
+        KeySchema:
+          - AttributeName: ticketId
+            KeyType: HASH
+        GlobalSecondaryIndexes: 
+          - IndexName: UserSubIndex
+            KeySchema: 
+              - AttributeName: userSub
+                KeyType: HASH
+              - AttributeName: createdAt
+                KeyType: RANGE          
+            Projection: 
+              ProjectionType: ALL    
+          - IndexName: StatusIndex
+            KeySchema: 
+              - AttributeName: status
+                KeyType: HASH
+              - AttributeName: createdAt
+                KeyType: RANGE          
+            Projection: 
+              ProjectionType: ALL          
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${param:tableName}
+    AttachmentsBucket: 
+      Type: AWS::S3::Bucket 
+      Properties: 
+        BucketName: ${self:service}-${self:provider.stage}-attachments
+        PublicAccessBlockConfiguration: 
+          BlockPublicAcls: false
+        OwnershipControls: 
+          Rules: 
+            - ObjectOwnership: ObjectWriter 
+    AttachmentsBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: { Ref: AttachmentsBucket }
+        PolicyDocument:
+          Statement:
+            - Effect: Allow 
+              Principal: "*"
+              Action: 
+                - "s3:GetObject"
+              Resource: "arn:aws:s3:::${self:service}-${self:provider.stage}-attachments/*"
+    TicketQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-ticket-queue
+    QueuePolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - Ref: TicketQueue
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Action: 
+                - "sqs:SendMessage"
+              Resource:
+                - arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${self:service}-${self:provider.stage}-ticket-queue
+              Principal: "*"
+        
+
+
+    
+
+
+    
