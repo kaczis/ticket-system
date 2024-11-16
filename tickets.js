@@ -146,7 +146,7 @@ router.post(
           console.log(error);
 
           res.status(500).json({ 
-              message: "Nie udało Ci się utworzyć ticketu",
+              message: "Nie udało Ci się utworzyć ticket",
               error: error.message
           });
       }
